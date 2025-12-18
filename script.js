@@ -569,13 +569,12 @@ function initGuestbook() {
         try {
             // 保存留言到Supabase
             const { error } = await supabase
-                .from('guestbook')
+                .from('guestbook_messages')
                 .insert([
                     {
                         name: guestName,
                         message: guestMessage,
-                        status: 'active',
-                        created_at: new Date().toISOString()
+                        status: 'active'
                     }
                 ]);
             
@@ -608,10 +607,11 @@ async function loadGuestbookMessages() {
     guestbookMessages.innerHTML = '<div style="text-align: center; padding: 40px;"><div class="loading loading-spinner loading-lg text-primary"></div><p class="mt-4 text-sm opacity-70">加载留言中...</p></div>';
     
     try {
-        // 从Supabase获取留言
+        // 从Supabase视图获取留言，包含点赞数和回复数
         const { data, error } = await supabase
-            .from('guestbook')
+            .from('guestbook_messages_with_counts')
             .select('*')
+            .eq('status', 'active')
             .order('created_at', { ascending: false });
         
         if (error) {
@@ -704,11 +704,22 @@ async function refreshGuestbook() {
 
 // 设置实时订阅
 function setupRealtimeSubscription() {
-    // 监听guestbook表的变化
+    // 监听多个表的变化
     const subscription = supabase
         .channel('guestbook-changes')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'guestbook' }, (payload) => {
+        // 监听留言表变化
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'guestbook_messages' }, (payload) => {
             // 当有新留言或留言更新时，重新加载留言列表
+            loadGuestbookMessages();
+        })
+        // 监听回复表变化
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'guestbook_replies' }, (payload) => {
+            // 当有新回复或回复更新时，重新加载留言列表
+            loadGuestbookMessages();
+        })
+        // 监听点赞表变化
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'guestbook_likes' }, (payload) => {
+            // 当有点赞或取消点赞时，重新加载留言列表
             loadGuestbookMessages();
         })
         .subscribe();
@@ -762,30 +773,40 @@ async function likeMessage(messageId, button) {
     }, 50);
     
     try {
-        // 更新Supabase中的点赞数
-        const { data: currentMessage, error: fetchError } = await supabase
-            .from('guestbook')
-            .select('likes')
-            .eq('id', messageId)
-            .single();
+        // 获取用户IP地址（简化实现）
+        const ipAddress = '127.0.0.1'; // 实际应用中可以使用第三方API获取真实IP
         
-        if (fetchError) throw fetchError;
+        // 插入点赞记录到guestbook_likes表
+        const { error: insertError } = await supabase
+            .from('guestbook_likes')
+            .insert([
+                {
+                    message_id: messageId,
+                    ip_address: ipAddress
+                }
+            ]);
         
-        // 获取最新点赞数并重新计算
-        const actualLikes = (currentMessage.likes || 0) + 1;
-        newLikes = actualLikes;
+        if (insertError) {
+            console.error('点赞插入失败:', insertError);
+            throw insertError;
+        }
         
-        const { error: updateError } = await supabase
-            .from('guestbook')
-            .update({ likes: actualLikes })
-            .eq('id', messageId);
+        // 获取更新后的点赞数
+        const { data: likes, error: countError } = await supabase
+            .from('guestbook_likes')
+            .select('id')
+            .eq('message_id', messageId);
         
-        if (updateError) throw updateError;
+        if (countError) {
+            console.error('获取点赞数失败:', countError);
+            throw countError;
+        }
         
-        // 确保最终显示正确的点赞数
-        likeCount.textContent = actualLikes;
+        // 更新点赞数
+        newLikes = likes ? likes.length : newLikes;
+        likeCount.textContent = newLikes;
         
-        console.log('留言点赞成功:', messageId);
+        console.log('留言点赞成功:', messageId, '新点赞数:', newLikes);
         
     } catch (error) {
         console.error('点赞失败:', error);
@@ -937,20 +958,20 @@ async function submitReply(event, messageId) {
     
     try {
         // 保存回复到Supabase
-        const { error } = await supabase
-            .from('guestbook')
+        const { error: insertError } = await supabase
+            .from('guestbook_replies')
             .insert([
                 {
                     name: name,
-                    message: message,
+                    content: message,
                     status: 'active',
-                    parent_id: messageId,
-                    created_at: new Date().toISOString()
+                    message_id: messageId
                 }
             ]);
         
-        if (error) {
-            throw error;
+        if (insertError) {
+            console.error('插入回复失败:', insertError);
+            throw insertError;
         }
         
         // 清空表单
@@ -968,15 +989,25 @@ async function submitReply(event, messageId) {
             setTimeout(() => successMsg.remove(), 300);
         }, 3000);
         
-        // 重新加载该留言的回复
+        // 重新加载该留言的回复，确保最新回复显示
         loadReplies(messageId);
         
         // 更新原留言的回复计数
-        updateReplyCount(messageId);
+        await updateReplyCount(messageId);
+        
+        // 触发父留言的UI更新，确保回复数正确显示
+        const parentMessage = document.querySelector(`[data-id="${messageId}"]`);
+        if (parentMessage) {
+            parentMessage.style.animation = 'reply-update 0.5s ease-out';
+            setTimeout(() => {
+                parentMessage.style.animation = '';
+            }, 500);
+        }
         
     } catch (error) {
         console.error('提交回复失败:', error);
-        alert('提交回复失败，请稍后重试');
+        // 显示更友好的错误提示
+        showErrorTooltip(submitBtn, '提交回复失败，请稍后重试');
     } finally {
         // 恢复按钮状态
         submitBtn.innerHTML = originalText;
@@ -995,9 +1026,9 @@ async function loadReplies(messageId) {
     try {
         // 从Supabase获取回复
         const { data, error } = await supabase
-            .from('guestbook')
+            .from('guestbook_replies')
             .select('*')
-            .eq('parent_id', messageId)
+            .eq('message_id', messageId)
             .eq('status', 'active')
             .order('created_at', { ascending: true });
         
@@ -1009,7 +1040,18 @@ async function loadReplies(messageId) {
         // 渲染回复
         if (data && data.length > 0) {
             data.forEach(reply => {
-                const replyElement = createMessageElement(reply, true);
+                // 转换回复数据结构以适配createMessageElement函数
+                const replyData = {
+                    id: reply.id,
+                    name: reply.name,
+                    message: reply.content,
+                    likes: 0, // 回复暂时不支持点赞
+                    reply_count: 0, // 回复暂时不支持嵌套回复
+                    created_at: reply.created_at,
+                    parent_id: reply.message_id
+                };
+                
+                const replyElement = createMessageElement(replyData, true);
                 replyList.appendChild(replyElement);
                 
                 // 添加回复进入动画
@@ -1029,17 +1071,17 @@ async function loadReplies(messageId) {
 async function updateReplyCount(messageId) {
     try {
         // 获取该留言的回复数量
-        const { data, error } = await supabase
-            .from('guestbook')
+        const { data: replies, error: countError } = await supabase
+            .from('guestbook_replies')
             .select('id')
-            .eq('parent_id', messageId)
+            .eq('message_id', messageId)
             .eq('status', 'active');
         
-        if (error) throw error;
+        if (countError) throw countError;
         
-        const replyCount = data ? data.length : 0;
+        const replyCount = replies ? replies.length : 0;
         
-        // 更新原留言的回复计数
+        // 更新原留言的回复计数显示
         const messageElement = document.querySelector(`[data-id="${messageId}"]`);
         if (messageElement) {
             const replyCountElement = messageElement.querySelector('.reply-count');
@@ -1056,6 +1098,7 @@ async function updateReplyCount(messageId) {
         
     } catch (error) {
         console.error('更新回复计数失败:', error);
+        showErrorTooltip(document.querySelector(`[data-id="${messageId}"]`), '更新回复计数失败');
     }
 }
 
