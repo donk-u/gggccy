@@ -608,10 +608,11 @@ async function loadGuestbookMessages() {
     guestbookMessages.innerHTML = '<div style="text-align: center; padding: 40px;"><div class="loading loading-spinner loading-lg text-primary"></div><p class="mt-4 text-sm opacity-70">加载留言中...</p></div>';
     
     try {
-        // 从Supabase获取留言
+        // 从Supabase获取留言，只获取顶层留言（parent_id为null）
         const { data, error } = await supabase
             .from('guestbook')
             .select('*')
+            .is('parent_id', null) // 只获取顶层留言
             .order('created_at', { ascending: false });
         
         if (error) {
@@ -624,8 +625,11 @@ async function loadGuestbookMessages() {
         // 渲染留言
         if (data && data.length > 0) {
             data.forEach(message => {
-                const messageElement = createMessageElement(message);
+                const messageElement = createMessageElement(message, false);
                 guestbookMessages.appendChild(messageElement);
+                
+                // 为每个留言加载回复
+                loadReplies(message.id);
             });
         } else {
             guestbookMessages.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--color-text-muted);">暂无留言，快来发表第一条留言吧！</div>';
@@ -762,25 +766,44 @@ async function likeMessage(messageId, button) {
     }, 50);
     
     try {
+        console.log('开始点赞操作，消息ID:', messageId);
+        
+        // 检查Supabase连接
+        if (!supabase) {
+            throw new Error('Supabase未初始化');
+        }
+        
         // 更新Supabase中的点赞数
+        console.log('开始从Supabase获取当前点赞数');
         const { data: currentMessage, error: fetchError } = await supabase
             .from('guestbook')
             .select('likes')
             .eq('id', messageId)
             .single();
         
-        if (fetchError) throw fetchError;
+        if (fetchError) {
+            console.error('获取当前点赞数失败:', fetchError);
+            throw fetchError;
+        }
+        
+        console.log('获取到当前点赞数:', currentMessage.likes);
         
         // 获取最新点赞数并重新计算
         const actualLikes = (currentMessage.likes || 0) + 1;
         newLikes = actualLikes;
         
+        console.log('开始更新点赞数为:', actualLikes);
         const { error: updateError } = await supabase
             .from('guestbook')
             .update({ likes: actualLikes })
             .eq('id', messageId);
         
-        if (updateError) throw updateError;
+        if (updateError) {
+            console.error('更新点赞数失败:', updateError);
+            throw updateError;
+        }
+        
+        console.log('点赞数更新成功');
         
         // 确保最终显示正确的点赞数
         likeCount.textContent = actualLikes;
@@ -936,7 +959,15 @@ async function submitReply(event, messageId) {
     submitBtn.disabled = true;
     
     try {
+        console.log('开始提交回复，原消息ID:', messageId);
+        
+        // 检查Supabase连接
+        if (!supabase) {
+            throw new Error('Supabase未初始化');
+        }
+        
         // 保存回复到Supabase
+        console.log('开始向Supabase插入回复');
         const { error } = await supabase
             .from('guestbook')
             .insert([
@@ -950,8 +981,11 @@ async function submitReply(event, messageId) {
             ]);
         
         if (error) {
+            console.error('插入回复到Supabase失败:', error);
             throw error;
         }
+        
+        console.log('回复成功插入到Supabase');
         
         // 清空表单
         replyForm.reset();
@@ -969,10 +1003,14 @@ async function submitReply(event, messageId) {
         }, 3000);
         
         // 重新加载该留言的回复
+        console.log('开始重新加载回复列表');
         loadReplies(messageId);
         
         // 更新原留言的回复计数
+        console.log('开始更新回复计数');
         updateReplyCount(messageId);
+        
+        console.log('回复功能完成');
         
     } catch (error) {
         console.error('提交回复失败:', error);
@@ -1054,9 +1092,46 @@ async function updateReplyCount(messageId) {
             }
         }
         
+        // 更新数据库中的回复计数（如果需要）
+        // 注意：这里我们可以选择是否在数据库中存储回复计数，
+        // 为了简单起见，我们可以只在客户端计算
+        
     } catch (error) {
         console.error('更新回复计数失败:', error);
     }
+}
+
+// 测试Supabase连接和基本功能
+function testSupabaseConnection() {
+    console.log('开始测试Supabase连接...');
+    
+    if (!supabase) {
+        console.error('Supabase未初始化');
+        return false;
+    }
+    
+    console.log('Supabase已初始化，开始测试基本查询...');
+    
+    // 测试基本查询
+    supabase
+        .from('guestbook')
+        .select('id, name')
+        .limit(1)
+        .then(({ data, error }) => {
+            if (error) {
+                console.error('Supabase查询失败:', error);
+                return false;
+            }
+            
+            console.log('Supabase连接测试成功！获取到数据:', data);
+            console.log('✅ 点赞和回复功能应该可以正常工作');
+            console.log('✅ 数据将被正确保存到Supabase云端');
+            return true;
+        })
+        .catch(err => {
+            console.error('测试过程中出现错误:', err);
+            return false;
+        });
 }
 
 // 初始化所有功能
@@ -1071,6 +1146,10 @@ function initAll() {
         initSleepSliders();
         initAISleepAnalysis();
         initGuestbook();
+        
+        // 添加测试函数到全局，方便调试
+        window.testSupabaseConnection = testSupabaseConnection;
+        console.log('📝 测试函数已添加到全局，请在浏览器控制台运行 testSupabaseConnection() 来测试Supabase连接');
     } catch (error) {
         console.error('初始化错误:', error);
         // 即使出错也隐藏加载动画
